@@ -531,3 +531,33 @@ impl ToLLVMDialect for FmaOp {
 
 lower_binary_intrinsic_arith!(FMinNanOp => "llvm.minimum");
 lower_binary_intrinsic_arith!(FMaxNanOp => "llvm.maximum");
+
+/// `dp4a` on NVPTX: the instruction where the architecture has it (`sm_61` and later), and an error
+/// elsewhere -- a non-NVPTX target reaches the operation through `LowerOp`, which keeps the polyfill,
+/// so arriving here on any other target means the pass order ran the lowering anyway.
+#[op_interface_impl]
+impl ToLLVMDialect for Dp4aOp {
+    fn rewrite(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        match ctx.target() {
+            #[cfg(feature = "nvptx")]
+            LlvmTarget::Nvptx if crate::nvptx::dp4a::supported(ctx) => {
+                crate::nvptx::dp4a::dp4a(self, ctx, rewriter, operands_info)
+            }
+            target => input_err!(self.loc(ctx), UnloweredDp4a(target)),
+        }
+    }
+}
+
+/// `dp4a` reached the LLVM lowering on a target that has no instruction for it. The polyfill in
+/// `LowerOp` is the path such a target takes; this error means the two disagree.
+#[derive(Debug, Error)]
+#[error(
+    "the {0:?} target has no `dp4a` instruction; its polyfill is the lowering, and the operation \
+     should not have reached the LLVM pass"
+)]
+pub struct UnloweredDp4a(LlvmTarget);

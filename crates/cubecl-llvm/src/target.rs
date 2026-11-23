@@ -53,4 +53,21 @@ pub trait CtxTarget: ContextExt {
     fn set_target(&mut self, value: LlvmTarget) {
         self.set_aux_ty(value);
     }
+
+    /// The NVPTX architecture being compiled for, which a lowering needs to know whether an
+    /// instruction exists on the part. `None` on every other target.
+    #[cfg(feature = "nvptx")]
+    fn sm_arch(&self) -> Option<cubecl_core::ir::nvidia::SmArch> {
+        self.try_aux_ty::<crate::target::NvptxArch>()
+            .map(|arch| arch.0)
+    }
+    #[cfg(feature = "nvptx")]
+    fn set_sm_arch(&mut self, arch: cubecl_core::ir::nvidia::SmArch) {
+        self.set_aux_ty(crate::target::NvptxArch(arch));
+    }
 }
+
+/// The architecture the compiler was given, carried on the context so a lowering can read it.
+#[cfg(feature = "nvptx")]
+#[derive(Clone, Copy, Debug)]
+pub struct NvptxArch(pub cubecl_core::ir::nvidia::SmArch);

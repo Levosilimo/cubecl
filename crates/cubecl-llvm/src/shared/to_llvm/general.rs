@@ -1,4 +1,5 @@
 use crate::{prelude::*, shared::to_llvm::lower_by_target};
+use cubecl_core::ir::dialect::InlineAsmOp;
 use cubecl_core::ir::dialect::general::{
     CastOp, CommentOp, CopyOp, FreeOp, PrintfOp, ReinterpretCastOp, SelectOp,
 };
@@ -502,3 +503,31 @@ fn with_float_lanes(ctx: &Context, ty: TypeHandle, scalar: TypeHandle) -> TypeHa
         None => scalar,
     }
 }
+
+/// Inline PTX, for the instructions LLVM has no intrinsic for. Only NVPTX lowers it: a target with
+/// no PTX assembler has nothing to hand the statement to, and the C++ backends take it through
+/// their own `LowerOp`.
+#[op_interface_impl]
+impl ToLLVMDialect for InlineAsmOp {
+    fn rewrite(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        match ctx.target() {
+            #[cfg(feature = "nvptx")]
+            LlvmTarget::Nvptx => {
+                crate::nvptx::inline_ptx::inline_asm(self, ctx, rewriter, operands_info)
+            }
+            target => input_err!(self.loc(ctx), NoInlineAsm(target)),
+        }
+    }
+}
+
+/// A `gpu_asm!` statement reached a target with no PTX assembler.
+#[derive(Debug, Error)]
+#[error(
+    "the {0:?} target has no inline PTX lowering; the statement is PTX and only NVPTX assembles it"
+)]
+pub struct NoInlineAsm(LlvmTarget);

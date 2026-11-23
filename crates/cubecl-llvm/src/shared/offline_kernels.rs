@@ -39,6 +39,62 @@ pub(crate) fn scale_kernel(address_type: AddressType) -> impl CubeKernel {
     )
 }
 
+/// A packed int8 dot product, four byte products accumulated per instruction.
+#[cube(launch)]
+fn dp4a_dot(a: &[i32], b: &[i32], c: &[i32], out: &mut [i32]) {
+    if ABSOLUTE_POS == 0usize {
+        out[0] = dp4a(a[0], b[0], c[0]);
+    }
+}
+
+pub(crate) fn dp4a_kernel() -> impl CubeKernel {
+    let settings = KernelSettings::new(
+        *CubeDim::new_1d(64),
+        ExecutionMode::Checked,
+        AddressType::U64,
+    );
+    dp4a_dot::Dp4aDot::new(
+        settings,
+        device_properties(32),
+        Arc::new(TargetProperties::default()),
+        BufferCompilationArg { inplace: None },
+        BufferCompilationArg { inplace: None },
+        BufferCompilationArg { inplace: None },
+        BufferCompilationArg { inplace: None },
+    )
+}
+
+/// The same statement written as raw PTX through the public frontend, which routes through
+/// `InlineAsmOp` rather than `Dp4aOp`.
+#[cube(launch)]
+fn dp4a_inline_ptx(a: &[i32], b: &[i32], c: &[i32], out: &mut [i32]) {
+    if ABSOLUTE_POS == 0usize {
+        let mut acc: i32;
+        gpu_asm!(
+            "dp4a.s32.s32 {}, {}, {}, {};",
+            out(_) acc, in(_) a[0], in(_) b[0], in(_) c[0]
+        );
+        out[0] = acc;
+    }
+}
+
+pub(crate) fn dp4a_inline_ptx_kernel() -> impl CubeKernel {
+    let settings = KernelSettings::new(
+        *CubeDim::new_1d(64),
+        ExecutionMode::Checked,
+        AddressType::U64,
+    );
+    dp4a_inline_ptx::Dp4aInlinePtx::new(
+        settings,
+        device_properties(32),
+        Arc::new(TargetProperties::default()),
+        BufferCompilationArg { inplace: None },
+        BufferCompilationArg { inplace: None },
+        BufferCompilationArg { inplace: None },
+        BufferCompilationArg { inplace: None },
+    )
+}
+
 /// A buffer struct: two coordinates and two indices, 16 bytes.
 #[derive(CubeType, Clone, Copy)]
 #[repr(C)]

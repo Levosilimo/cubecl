@@ -889,3 +889,45 @@ fn a_unit_fence_lowers_to_the_ptx_scope_of_its_scope() {
         }
     }
 }
+
+/// `dp4a` is one instruction from sm_61, so the kernel that asks for it must contain
+/// `dp4a.s32.s32` and none of the polyfill's multiply/add sequence.
+#[test]
+fn dp4a_is_one_instruction_where_the_part_has_it() {
+    let ptx = ptx_of(crate::shared::offline_kernels::dp4a_kernel(), 61);
+    assert!(
+        ptx.contains("dp4a.s32.s32"),
+        "the instruction, not the polyfill:\n{ptx}"
+    );
+}
+
+/// Before sm_61 there is no such instruction, so the polyfill stands in for it -- four multiplies
+/// and four adds. Correct, and much slower.
+#[test]
+fn dp4a_is_a_polyfill_before_the_part_has_it() {
+    let ptx = ptx_of(crate::shared::offline_kernels::dp4a_kernel(), 60);
+    // The kernel is named for what it does, so the check is on the instruction, not the name.
+    assert!(
+        !ptx.contains("dp4a.s32"),
+        "no instruction on a die without it:\n{ptx}"
+    );
+    // A byte comes out of the word by a sign-extending convert or a shift, and the four products
+    // accumulate through `mad` -- the sequence the instruction replaces with one opcode.
+    let unpacked = ptx.matches("cvt.s32.s8").count() + ptx.matches("shr.s32").count();
+    assert!(unpacked >= 4, "every byte of the word is separated:\n{ptx}");
+    assert!(
+        ptx.matches("mad.lo.s32").count() >= 4,
+        "the four products accumulate:\n{ptx}"
+    );
+}
+
+/// A `gpu_asm!` statement reaches the NVPTX backend as inline assembly: the template is passed
+/// through verbatim, which is what lets a kernel use an instruction LLVM has no intrinsic for.
+#[test]
+fn gpu_asm_lowers_to_inline_assembly() {
+    let ptx = ptx_of(crate::shared::offline_kernels::dp4a_inline_ptx_kernel(), 61);
+    assert!(
+        ptx.contains("dp4a.s32.s32"),
+        "the statement is passed through:\n{ptx}"
+    );
+}

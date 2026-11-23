@@ -141,6 +141,14 @@ impl RegisterClass {
         if ty.is::<FP16Type>() || ty.is::<BF16Type>() {
             return RegisterClass::B16;
         }
+        // An operand of a `cube.asm` this backend reaches has already been through the type
+        // conversion, so a pointer here is LLVM's opaque pointer rather than the cube one. Both mean
+        // one 64-bit register.
+        if ty.downcast_ref::<LlvmPointerType>().is_some()
+            || ty.downcast_ref::<CubePointerType>().is_some()
+        {
+            return RegisterClass::B64;
+        }
         match ty.downcast_ref::<IntegerType>().map(|int| int.width()) {
             Some(16) => RegisterClass::B16,
             Some(64) => RegisterClass::B64,

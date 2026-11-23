@@ -23,8 +23,24 @@ use cubecl_core::{
     },
 };
 
+/// `dp4a` is one instruction on NVPTX from `sm_61`, and a polyfill of four multiplies and four adds
+/// everywhere else -- and on a Pascal die it is the only fast arithmetic there is, so the polyfill
+/// costs 7-8x. The instruction is taken where the architecture has it and the polyfill kept as the
+/// fallback: an earlier die, or any target that is not NVPTX.
 #[op_interface_impl]
 impl LowerOp for Dp4aOp {
+    fn should_lower(&self, ctx: &Context) -> bool {
+        #[cfg(feature = "nvptx")]
+        {
+            !crate::nvptx::dp4a::supported(ctx)
+        }
+        #[cfg(not(feature = "nvptx"))]
+        {
+            let _ = ctx;
+            true
+        }
+    }
+
     fn lower(&self, scope: &Scope) -> Vec<Value> {
         let ctx = scope.ctx();
         vec![expand_dp4a_polyfill(
