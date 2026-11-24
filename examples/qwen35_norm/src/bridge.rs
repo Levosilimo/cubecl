@@ -170,6 +170,23 @@ pub unsafe extern "C" fn norm_run(rows: u32, eps: f32) -> i32 {
         d,
         b.warps,
     );
+    // NO SYNC. A sync inside a capture invalidates it (`cudaErrorStreamCaptureInvalidated`), and cubecl launches
+    // on `StreamId::current()` -- the current torch stream -- so an unsynced launch is ordered by the graph
+    // exactly like any other kernel in it. This is the entry point that costs NOTHING per call: no round trip,
+    // no sync, no bridge. The caller reads the result with torch once the graph has replayed.
+    let _ = &b.client;
+    0
+}
+
+/// Host-side wait, for callers outside a graph. Deliberately separate from `norm_run` so a captured call is
+/// never accidentally synchronised.
+///
+/// # Safety
+/// `norm_init` must have run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn norm_sync() -> i32 {
+    let guard = bridge().lock().unwrap();
+    let Some(b) = guard.as_ref() else { return -1 };
     match block_on(b.client.sync()) {
         Ok(()) => 0,
         Err(_) => -4,
