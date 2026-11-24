@@ -168,3 +168,5 @@ pub fn said5(a: &[f32], b: &[f32], c: &[f32], d: &[f32], out: &mut [f32]) {
         out[i] = a[i] + b[i] + c[i] + d[i];
     }
 }
+
+pub mod bridge;

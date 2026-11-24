@@ -17,8 +17,7 @@
 use cubecl::prelude::*;
 use cubecl_environment::future::block_on;
 use cubecl_runtime::server::Handle;
-use std::sync::OnceLock;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// One resident buffer. `handle` is cubecl's allocation; `bytes` is its capacity.
 struct Resident {
@@ -58,56 +57,81 @@ pub struct NormDims {
 /// # Safety
 /// `d` must match the model's hidden size and the weights passed to later calls must have `d` elements.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn norm_init(d: u32, warps: u32) -> i32 {
+pub unsafe extern "C" fn norm_init(d: u32, warps: u32, max_rows: u32) -> i32 {
     let device = cubecl::Device::default();
     let client = device.client();
     let d = d as usize;
-    let bytes = d * core::mem::size_of::<f32>();
+    // buffers are sized for the LARGEST span once, so a call never reallocates: re-allocation on the hot path is
+    // what the whole residency design exists to avoid.
+    let n = d * max_rows.max(1) as usize;
     let mk = |n: usize| Resident {
         handle: client.empty(n * core::mem::size_of::<f32>()),
         elems: n,
     };
     let b = Bridge {
-        x_norm: Some(mk(d)),
-        x_added: Some(mk(d)),
-        gate: Some(mk(d)),
+        x_norm: Some(mk(n)),
+        x_added: Some(mk(n)),
+        gate: Some(mk(n)),
         weight: Some(mk(d)),
-        out: Some(mk(d)),
+        out: Some(mk(n)),
         d,
         warps: warps as usize,
         client,
     };
-    let _ = bytes;
     *bridge().lock().unwrap() = Some(b);
     0
 }
 
-/// The device address of a resident buffer, so the caller can copy into it directly with its own stream.
-/// `which`: 0 input to the norm, 1 residual, 2 gate, 3 weight, 4 output.
+/// Copy the caller's bytes into resident buffer `which`. `ptr` MUST BE A HOST POINTER holding `bytes` bytes.
+///
+/// A device pointer would be dereferenced by the host memcpy below and segfault -- the first version of this
+/// did exactly that with a torch `data_ptr()`, which is why the ABI takes host data and the caller stages it.
+/// That staging is the 33 us per 8 KiB round trip the bridge costs and the reason a shipping design is one
+/// `step()` entry rather than a per-sublayer call.
+///
+/// The copy is a HOST round trip because cubecl exposes no device address for a local buffer (`address()` exists
+/// only on `PeerBinding`). Measured at 33 us per 8 KiB, so this entry point exists to VALIDATE the kernel inside
+/// the model, not to ship: the shipping shape is one `step()` entry per decode step (windows/analysis/cubecl_spike.md).
 ///
 /// # Safety
-/// `norm_init` must have been called and the returned handle must outlive its use.
+/// `ptr` must point to `bytes` readable HOST bytes, and `norm_init` must have run.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn norm_ptr(which: u32) -> u64 {
+pub unsafe extern "C" fn norm_write(which: u32, ptr: *const u8, bytes: u64) -> i32 {
     let guard = bridge().lock().unwrap();
-    let Some(b) = guard.as_ref() else {
-        return 0;
-    };
+    let Some(b) = guard.as_ref() else { return -1 };
     let r = match which {
         0 => &b.x_norm,
         1 => &b.x_added,
         2 => &b.gate,
         3 => &b.weight,
-        4 => &b.out,
-        _ => return 0,
+        _ => return -2,
     };
-    match r {
-        Some(res) => {
-            let addr = block_on(b.client.get_resource_addr(&res.handle));
-            addr.unwrap_or(0)
-        }
-        None => 0,
+    let Some(res) = r else { return -2 };
+    if bytes as usize > res.elems * 4 {
+        return -3;
     }
+    let slice = core::slice::from_raw_parts(ptr, bytes as usize);
+    b.client.write(&res.handle, cubecl::bytes::Bytes::from_bytes_vec(slice.to_vec()));
+    block_on(b.client.sync()).map(|_| 0).unwrap_or(-4)
+}
+
+/// Copy the resident output back to the caller.
+///
+/// # Safety
+/// `ptr` must point to `bytes` writable HOST bytes, and `norm_init` must have run. Two copies happen: the read
+/// lands in a host staging buffer and then is memcpy'd out, which is what makes a read 30 us.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn norm_read_out(ptr: *mut u8, bytes: u64) -> i32 {
+    let guard = bridge().lock().unwrap();
+    let Some(b) = guard.as_ref() else { return -1 };
+    let Some(res) = &b.out else { return -2 };
+    if bytes as usize > res.elems * 4 {
+        return -3;
+    }
+    let Ok(data) = b.client.read_one(res.handle.clone()) else { return -4 };
+    let dst = core::slice::from_raw_parts_mut(ptr, bytes as usize);
+    dst.copy_from_slice(&data[..bytes as usize]);
+    0
 }
 
 /// Run the fused kernel over `rows` rows held in the resident buffers.
