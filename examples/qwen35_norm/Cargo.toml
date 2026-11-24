@@ -6,6 +6,9 @@ name = "qwen35_norm"
 publish = false
 version.workspace = true
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [lints]
 workspace = true
 
