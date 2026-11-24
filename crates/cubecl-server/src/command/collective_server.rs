@@ -48,6 +48,20 @@ pub trait CollectiveServer: Sized {
     /// The compute streams, and the failures their buffers carry.
     fn streams(&mut self) -> &mut MultiStream<<Self::Driver as Driver>::Backend>;
 
+    /// Wrap the caller's `raw` stream instead of creating streams of the library's own, or `None` to restore
+    /// the default. Callers that own the ordering -- a CUDA-graph capture being the case -- need this: work
+    /// dispatched on a stream the library made itself is invisible to their graph, so a kernel launched that
+    /// way inside a `torch.cuda.graph` body runs eagerly at capture time and never on replay.
+    ///
+    /// Applies to every stream handed out after the call, because the point is to have no launch happen on a
+    /// stream of the library's own making. The default is a no-op, for backends that cannot honour it.
+    fn set_external_stream(&mut self, _raw: Option<u64>) {}
+
+    /// The raw stream a launch would dispatch on, where the backend can say. For checking a pin took effect.
+    fn launch_stream(&self) -> u64 {
+        0
+    }
+
     /// A command on `stream_id` over `handles`, with this device current.
     ///
     /// # Errors

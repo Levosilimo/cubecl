@@ -2181,6 +2181,32 @@ impl Client {
     /// # Safety
     ///
     /// This function isn't thread safe and might create memory leaks.
+    /// Wrap `raw` instead of creating streams, for a caller that owns the ordering, or `None` to restore the
+    /// default. Every stream handed out after this call is `raw`.
+    ///
+    /// This is what lets a framework that owns an ordering -- pytorch's CUDA graphs being the case that
+    /// prompted it -- see this runtime's launches at all. Without it a kernel dispatches on a stream created by
+    /// the backend itself, so inside a `torch.cuda.graph` body it runs eagerly at capture time and never on
+    /// replay, while still appearing to work because capture-time execution sees the inputs that are present.
+    ///
+    /// # Safety
+    ///
+    /// `raw` must be a live `CUstream` the caller owns and outlives every launch made through this client.
+    pub unsafe fn set_external_stream(&self, raw: Option<u64>) {
+        self.device
+            .submit(move |server| server.set_external_stream(raw));
+    }
+
+    /// The raw stream the next launch goes to, as the backend resolved it. For checking that a
+    /// [`set_external_stream`](Self::set_external_stream) pin actually took effect.
+    pub fn launch_stream(&self) -> u64 {
+        let mut out = 0u64;
+        let _ = self
+            .device
+            .submit_blocking(move |server| out = server.launch_stream());
+        out
+    }
+
     pub unsafe fn allocation_mode(&self, mode: MemoryAllocationMode) {
         let stream_id = self.stream_id();
         self.device

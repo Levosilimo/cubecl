@@ -67,6 +67,31 @@ pub struct CudaStreamBackend {
     priority: StreamPriority,
     /// The device's captures, which every stream this creates takes its capture state from.
     captures: DeviceCaptures,
+    /// A stream the caller created and owns, which every stream this backend hands out wraps instead of
+    /// creating one. `None` (the default) preserves `cuStreamCreate`.
+    ///
+    /// Why this exists: a framework that owns an ordering -- pytorch's CUDA graphs being the case that
+    /// prompted it -- cannot capture work a library dispatches on a stream of the library's own making. A
+    /// kernel launched on a stream created by `cuStreamCreate` inside a `torch.cuda.graph` body runs eagerly
+    /// at capture time and never on replay, while still appearing to work, because capture-time execution
+    /// sees the inputs that are present. Handing the caller's stream in is what makes such a launch an
+    /// ordinary node of the caller's graph.
+    external_stream: Option<u64>,
+}
+
+impl CudaStreamBackend {
+    /// Wrap `raw` instead of creating a stream, for a caller that owns the ordering itself.
+    ///
+    /// Applies to every stream this backend has already handed out and every one it creates afterwards, so a
+    /// caller sets it before its first launch. Passing `None` restores `cuStreamCreate`.
+    pub fn set_external_stream(&mut self, raw: Option<u64>) {
+        self.external_stream = raw;
+    }
+
+    /// The stream the caller pinned, if any.
+    pub fn external_stream(&self) -> Option<u64> {
+        self.external_stream
+    }
 }
 
 /// Create a non-blocking CUDA stream, applying the requested priority hint.
@@ -135,7 +160,12 @@ impl EventStreamBackend for CudaStreamBackend {
     type Event = Fence;
 
     fn create_stream(&self) -> Result<Self::Stream, ServerError> {
-        let stream = create_cuda_stream(self.priority)?;
+        // A caller-supplied stream is used as-is, never created and never destroyed here: its lifetime is the
+        // caller's, and wrapping it is what orders this backend's work against the caller's ordering.
+        let stream = match self.external_stream {
+            Some(raw) => raw as cudarc::driver::sys::CUstream,
+            None => create_cuda_stream(self.priority)?,
+        };
 
         let storage = GpuStorage::new();
 

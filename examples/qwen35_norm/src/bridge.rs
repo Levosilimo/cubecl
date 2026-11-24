@@ -93,6 +93,39 @@ pub unsafe extern "C" fn norm_init(d: u32, warps: u32, max_rows: u32) -> i32 {
     0
 }
 
+/// Pin the stream every launch from this bridge goes to. `u64::MAX` lets cubecl create its own.
+///
+/// NOT `0` for "none": the legacy default stream IS `0x0`, so zero is a legitimate stream to pin and using it
+/// as the sentinel silently pinned nothing -- measured, and it is why this signature takes `u64::MAX`.
+///
+/// This is what makes a launch an ordinary node of the caller's ordering. Without it the backend creates its
+/// own stream, so a kernel launched from inside a `torch.cuda.graph` body runs EAGERLY at capture time and
+/// never on replay -- and looks correct, because capture-time execution sees the inputs that are present.
+/// Measured before this existed: an input varied between replays left the output frozen.
+///
+/// # Safety
+/// `norm_init` must have run, `raw` must be a live stream the caller owns, and it must be passed BEFORE the
+/// first launch.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn norm_set_stream(raw: u64) -> i32 {
+    let guard = bridge().lock().unwrap();
+    let Some(b) = guard.as_ref() else { return -1 };
+    let stream = if raw == u64::MAX { None } else { Some(raw) };
+    b.client.set_external_stream(stream);
+    0
+}
+
+/// Read back the stream the backend will launch on, to check the pin reached it.
+///
+/// # Safety
+/// `norm_init` must have run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn norm_get_stream() -> u64 {
+    let guard = bridge().lock().unwrap();
+    let Some(b) = guard.as_ref() else { return 0 };
+    b.client.launch_stream()
+}
+
 /// The device address of a resident buffer, or 0 if it has none. `which` is 0 input, 1 residual, 2 gate,
 /// 3 weight, 4 output.
 ///
@@ -233,6 +266,36 @@ pub unsafe extern "C" fn norm_run(rows: u32, eps: f32) -> i32 {
     // exactly like any other kernel in it. This is the entry point that costs NOTHING per call: no round trip,
     // no sync, no bridge. The caller reads the result with torch once the graph has replayed.
     let _ = &b.client;
+    0
+}
+
+/// Run the *plain* RMSNorm -- the real call-site shape -- over `rows` rows of the input buffer.
+///
+/// Writes into the `out` resident buffer. Unsynced for the same reason as `norm_run`.
+///
+/// # Safety
+/// `norm_init` must have run and the input buffers must hold `rows * d` fp16 values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn norm_plain_run(rows: u32, eps: f32) -> i32 {
+    let guard = bridge().lock().unwrap();
+    let Some(b) = guard.as_ref() else { return -1 };
+    let d = b.d;
+    let (Some(x), Some(w), Some(o)) = (&b.x_norm, &b.weight, &b.out) else { return -2 };
+    let n = rows as usize * d;
+    if x.elems < n || o.elems < n {
+        return -3;
+    }
+    crate::rmsnorm_plain::launch::<half::f16, half::f16>(
+        &b.client,
+        CubeCount::Static(rows, 1, 1),
+        CubeDim::new_1d((b.warps * 32) as u32),
+        BufferArg::from_raw_parts(x.handle.clone(), n),
+        BufferArg::from_raw_parts(w.handle.clone(), d),
+        BufferArg::from_raw_parts(o.handle.clone(), n),
+        eps,
+        d,
+        b.warps,
+    );
     0
 }
 

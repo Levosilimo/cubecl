@@ -306,6 +306,16 @@ impl<B: EventStreamBackend> MultiStream<B> {
         &mut self.streams.factory_mut().backend
     }
 
+    /// The streams that already exist, mutably. [`backend_mut`](Self::backend_mut) only governs streams
+    /// created later, so a change that has to apply to the runtime as it stands needs this.
+    pub fn streams_existing(&self) -> impl Iterator<Item = &B::Stream> {
+        self.streams.streams().map(|s| &s.stream)
+    }
+
+    pub fn streams_existing_mut(&mut self) -> impl Iterator<Item = &mut B::Stream> {
+        self.streams.streams_existing_mut().map(|s| &mut s.stream)
+    }
+
     /// Creates an empty multi-stream.
     pub fn new(logger: Arc<ServerLogger>, backend: B, max_stream_count: u8) -> Self {
         let wrapper = EventStreamBackendWrapper { backend };

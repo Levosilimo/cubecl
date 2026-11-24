@@ -1073,6 +1073,19 @@ pub trait Server:
         Vec::from([StreamId::current()])
     }
 
+    /// Wrap the caller's `raw` stream instead of creating streams of the library's own, or `None` to restore
+    /// the default. Callers that own the ordering need this -- see `Client::set_external_stream`.
+    ///
+    /// The default is a no-op, for backends that cannot honour it.
+    fn set_external_stream(&mut self, _raw: Option<u64>) {}
+
+    /// The raw stream a launch would dispatch on, or 0 where the backend cannot say.
+    fn launch_stream(&self) -> u64 {
+        0
+    }
+
+
+
     /// Ask the server to release memory that it can release.
     ///
     /// # Errors

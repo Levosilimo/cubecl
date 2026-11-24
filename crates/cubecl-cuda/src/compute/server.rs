@@ -482,6 +482,23 @@ impl Server for CudaServer {
         self.streams.stream_ids().collect()
     }
 
+    fn launch_stream(&self) -> u64 {
+        self.streams.streams_existing().next().map(|s| s.sys as u64).unwrap_or(0)
+    }
+
+    fn set_external_stream(&mut self, raw: Option<u64>) {
+        self.streams.backend_mut().set_external_stream(raw);
+        // Retarget the streams that already exist: `backend_mut` only governs streams created later, and a
+        // runtime that answered `norm_init` has already created this one, so pinning without this is a silent
+        // no-op -- which is exactly how the first version of this patch failed.
+        if let Some(raw) = raw {
+            let cu = raw as cudarc::driver::sys::CUstream;
+            for stream in self.streams.streams_existing_mut() {
+                stream.sys = cu;
+            }
+        }
+    }
+
     fn memory_cleanup(&mut self, stream_id: StreamId) -> Result<(), ServerError> {
         let mut command = self.command_no_inputs(stream_id)?;
         command.memory_cleanup()
@@ -770,6 +787,8 @@ impl CudaServer {
                     utilities.logger.clone(),
                     stream_priority,
                     captures,
+                    // no external stream: the default, and the only behaviour before this option existed
+                    None,
                 ),
                 max_stream_count,
             ),

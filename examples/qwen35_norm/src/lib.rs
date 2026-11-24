@@ -170,3 +170,67 @@ pub fn said5(a: &[f32], b: &[f32], c: &[f32], d: &[f32], out: &mut [f32]) {
 }
 
 pub mod bridge;
+
+/// Qwen3.5's `Qwen3_5RMSNorm` exactly, in one launch: `y = (x * rsqrt(mean(x^2) + eps)) * (1 + w)`.
+///
+/// This is the *real* call site shape. The residual add and the SiLU gate live outside the norm module in the
+/// decoder layer (`x = x + input_layernorm(x)`), so a patch that replaces the norm module can only fuse the norm
+/// itself -- 13 kernels down to 1, with the residual left as the torch op it already is.
+///
+/// Reference (`modeling_qwen3_5.py:835`): sum of squares and normalisation in f32, weight applied as `1.0 + w`,
+/// ONE rounding to the model dtype at the end. `x` may be fp16 while the accumulation is f32, which is why the
+/// two types are separate parameters.
+#[cube(launch)]
+pub fn rmsnorm_plain<F: Float, E: Float>(
+    x: &[F],
+    weight: &[E],
+    out: &mut [F],
+    eps: f32,
+    #[comptime] d: usize,
+    #[comptime] warps: usize,
+) {
+    let plane = 32u32;
+    let lane = UNIT_POS_X % plane;
+    let warp = (UNIT_POS_X / plane) as usize;
+    let row = CUBE_POS_X as usize;
+    let base = row * d;
+
+    let mut local = 0.0f32;
+    let mut i = UNIT_POS_X;
+    while i < d as u32 {
+        let v = f32::cast_from(x[base + i as usize]);
+        local += v * v;
+        i += CUBE_DIM_X;
+    }
+    let partial = plane_sum(local);
+    let mut staged = Shared::<[f32]>::new_slice(32usize);
+    if lane == 0 {
+        staged[warp] = partial;
+    }
+    sync_cube();
+    if warp == 0 {
+        let mut p = 0.0f32;
+        if lane < warps as u32 {
+            p = staged[lane as usize];
+        }
+        p = plane_sum(p);
+        if lane == 0 {
+            staged[0] = p;
+        }
+    }
+    sync_cube();
+    // read into a register, THEN barrier: returning `staged[0]` directly races the next call's store (the same
+    // defect gdn_layer.cu's block_sum had, memory 4248)
+    let total = staged[0];
+    sync_cube();
+
+    let rstd = f32::inverse_sqrt(total / d as f32 + eps);
+    let mut j = UNIT_POS_X;
+    while j < d as u32 {
+        let idx = base + j as usize;
+        let n = f32::cast_from(x[idx]) * rstd;
+        let w = 1.0f32 + f32::cast_from(weight[j as usize]);
+        out[idx] = F::cast_from(n * w);
+        j += CUBE_DIM_X;
+    }
+}

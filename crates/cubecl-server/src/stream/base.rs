@@ -238,6 +238,17 @@ impl<F: StreamFactory> StreamPool<F> {
     pub fn factory_mut(&mut self) -> &mut F {
         &mut self.factory
     }
+
+    /// The pools of streams that already exist, mutably. [`factory_mut`](Self::factory_mut) only governs
+    /// streams created later, so a change that has to apply to the runtime as it stands needs this.
+    pub fn streams_existing_mut(&mut self) -> impl Iterator<Item = &mut F::Stream> {
+        self.streams.iter_mut().flatten()
+    }
+
+    /// [`streams_existing_mut`](Self::streams_existing_mut), shared.
+    pub fn streams_existing(&self) -> impl Iterator<Item = &F::Stream> {
+        self.streams.iter().flatten()
+    }
 }
 
 /// Maps a stream ID to an index within the pool's capacity using modulo arithmetic.
