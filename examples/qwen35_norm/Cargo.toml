@@ -1,0 +1,20 @@
+[package]
+authors = []
+edition.workspace = true
+license.workspace = true
+name = "qwen35_norm"
+publish = false
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+cuda = ["cubecl/cuda", "cubecl/cuda-cpp"]
+default = ["cuda"]
+
+[dependencies]
+cubecl = { workspace = true, default-features = true, features = ["std"] }
+half = { workspace = true }
+cubecl-environment = { workspace = true }
+cubecl-runtime = { workspace = true }

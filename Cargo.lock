@@ -4228,6 +4228,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "qwen35_norm"
+version = "0.12.0-pre.2"
+dependencies = [
+ "cubecl",
+ "cubecl-environment",
+ "cubecl-runtime",
+ "half",
+]
+
+[[package]]
 name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
