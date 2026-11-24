@@ -112,7 +112,26 @@ pub unsafe extern "C" fn norm_write(which: u32, ptr: *const u8, bytes: u64) -> i
     }
     let slice = core::slice::from_raw_parts(ptr, bytes as usize);
     b.client.write(&res.handle, cubecl::bytes::Bytes::from_bytes_vec(slice.to_vec()));
-    block_on(b.client.sync()).map(|_| 0).unwrap_or(-4)
+    // NO SYNC, for the same reason as `norm_run`: a sync inside a capture invalidates it. The write is
+    // enqueued on the current stream, which is the capturing stream, so the graph orders it.
+    if SYNC_WRITES.load(core::sync::atomic::Ordering::Relaxed) {
+        block_on(b.client.sync()).map(|_| 0).unwrap_or(-4)
+    } else {
+        0
+    }
+}
+
+/// Whether `norm_write` should wait for its copy. Off by default so a captured call is legal; `norm_sync` is the
+/// explicit wait for callers outside a graph.
+static SYNC_WRITES: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Turn the synchronous write on or off. Off is the captured-graph mode.
+///
+/// # Safety
+/// Must be called from the same thread that performs the writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn norm_set_sync_writes(on: u32) {
+    SYNC_WRITES.store(on != 0, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Copy the resident output back to the caller.
