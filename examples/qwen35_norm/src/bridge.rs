@@ -15,13 +15,21 @@
 //! API deletes it; nothing else in this design changes if it does.
 
 use cubecl::prelude::*;
+use cubecl::cuda::compute::CudaServer;
+use cubecl::cuda::compute::storage::gpu::GpuResource;
 use cubecl_environment::future::block_on;
 use cubecl_runtime::server::Handle;
+use cubecl_runtime::storage::ManagedResource;
 use std::sync::{Mutex, OnceLock};
 
-/// One resident buffer. `handle` is cubecl's allocation; `bytes` is its capacity.
+/// One resident buffer. `handle` is cubecl's allocation, `bound` keeps it in place and carries its device
+/// address, and `elems` is its capacity.
+///
+/// Holding the binding is what makes the address safe to hand out: a bound allocation is never freed, handed
+/// out again or relocated, so `address()` stays valid for as long as this struct lives.
 struct Resident {
     handle: Handle,
+    bound: Option<ManagedResource<GpuResource>>,
     elems: usize,
 }
 
@@ -64,9 +72,12 @@ pub unsafe extern "C" fn norm_init(d: u32, warps: u32, max_rows: u32) -> i32 {
     // buffers are sized for the LARGEST span once, so a call never reallocates: re-allocation on the hot path is
     // what the whole residency design exists to avoid.
     let n = d * max_rows.max(1) as usize;
-    let mk = |n: usize| Resident {
-        handle: client.empty(n * core::mem::size_of::<f32>()),
-        elems: n,
+    let mk = |n: usize| {
+        let handle = client.empty(n * core::mem::size_of::<f32>());
+        // `get_resource` binds the allocation for as long as the result is held, which is exactly what makes
+        // `address()` below valid to hand to another framework.
+        let bound = client.get_resource::<CudaServer>(handle.clone()).ok();
+        Resident { handle, bound, elems: n }
     };
     let b = Bridge {
         x_norm: Some(mk(n)),
@@ -80,6 +91,34 @@ pub unsafe extern "C" fn norm_init(d: u32, warps: u32, max_rows: u32) -> i32 {
     };
     *bridge().lock().unwrap() = Some(b);
     0
+}
+
+/// The device address of a resident buffer, or 0 if it has none. `which` is 0 input, 1 residual, 2 gate,
+/// 3 weight, 4 output.
+///
+/// This is the piece that removes the boundary copy: with a real device pointer the caller can `memcpy` d2d
+/// (or hand it to DLPack) instead of staging through the host, and a d2d copy inside a capture costs ~1.4 us
+/// instead of the 63 us host round trip.
+///
+/// # Safety
+/// `norm_init` must have run, and the pointer is valid only while the bridge lives -- i.e. until `norm_init`
+/// is called again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn norm_ptr(which: u32) -> u64 {
+    let guard = bridge().lock().unwrap();
+    let Some(b) = guard.as_ref() else { return 0 };
+    let r = match which {
+        0 => &b.x_norm,
+        1 => &b.x_added,
+        2 => &b.gate,
+        3 => &b.weight,
+        4 => &b.out,
+        _ => return 0,
+    };
+    match r.as_ref().and_then(|res| res.bound.as_ref()) {
+        Some(m) => m.resource().ptr,
+        None => 0,
+    }
 }
 
 /// Copy the caller's bytes into resident buffer `which`. `ptr` MUST BE A HOST POINTER holding `bytes` bytes.

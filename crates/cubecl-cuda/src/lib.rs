@@ -3,7 +3,10 @@ extern crate derive_new;
 extern crate alloc;
 
 pub mod compiler;
-mod compute;
+// Public so a caller can name `CudaServer` and read an allocation's device address through
+// `Client::get_resource`: a runtime that cannot tell a caller where its memory lives forces every
+// boundary with another framework to a host round trip (measured at 63 us per 8 KiB).
+pub mod compute;
 mod device;
 mod runtime;
 

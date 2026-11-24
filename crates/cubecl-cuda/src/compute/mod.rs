@@ -5,7 +5,7 @@ pub(crate) mod context;
 pub(crate) mod driver;
 pub(crate) mod events;
 pub(crate) mod modules;
-pub(crate) mod storage;
+pub mod storage;
 pub(crate) mod stream;
 
 mod server;
